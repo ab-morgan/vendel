@@ -31,6 +31,7 @@ func RegisterUserHooks(app *pocketbase.PocketBase) {
 		collections := []string{
 			"sms_messages", "sms_devices", "webhook_configs",
 			"api_keys", "user_quotas", "sms_templates", "scheduled_sms",
+			"contacts",
 		}
 		for _, col := range collections {
 			records, err := e.App.FindRecordsByFilter(col, "user = {:uid}", "", 0, 0, dbx.Params{"uid": userId})
