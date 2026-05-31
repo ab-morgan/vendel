@@ -1,5 +1,8 @@
 modem-agent/
 frontend/node_modules/
 frontend/dist/
+frontend/.env.development
+frontend/.env.local
+frontend/.env.*.local
 .git/
 *.md
