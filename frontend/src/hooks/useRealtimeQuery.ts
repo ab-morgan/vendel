@@ -10,6 +10,7 @@ export function useRealtimeQuery(collection: string, queryKeys: string[][]) {
   useEffect(() => {
     if (!pb.authStore.isValid) return
 
+    let cancelled = false
     let unsubFn: (() => Promise<void>) | null = null
 
     pb.collection(collection)
@@ -19,10 +20,16 @@ export function useRealtimeQuery(collection: string, queryKeys: string[][]) {
         }
       })
       .then((fn) => {
-        unsubFn = fn
+        if (cancelled) {
+          // Component unmounted before subscribe resolved; release immediately.
+          fn()
+        } else {
+          unsubFn = fn
+        }
       })
 
     return () => {
+      cancelled = true
       unsubFn?.()
     }
   }, [collection, queryClient])

@@ -2,7 +2,6 @@ package hooks
 
 import (
 	"log/slog"
-	"vendel/middleware"
 	"vendel/services"
 
 	"github.com/pocketbase/dbx"
@@ -11,28 +10,8 @@ import (
 )
 
 // RegisterUserHooks registers hooks for user lifecycle events:
-// app_name sync, default quota creation, and cascade deletion.
+// default quota creation and cascade deletion.
 func RegisterUserHooks(app *pocketbase.PocketBase) {
-	// System config: sync app_name to PocketBase settings + invalidate caches
-	app.OnRecordAfterUpdateSuccess("system_config").BindFunc(func(e *core.RecordEvent) error {
-		key := e.Record.GetString("key")
-
-		if key == "app_name" {
-			settings := e.App.Settings()
-			settings.Meta.AppName = e.Record.GetString("value")
-			settings.Meta.SenderName = e.Record.GetString("value")
-			if err := e.App.Save(settings); err != nil {
-				e.App.Logger().Warn("could not sync app_name to PocketBase settings", slog.Any("error", err))
-			}
-		}
-
-		if key == "maintenance_mode" {
-			middleware.InvalidateMaintenanceCache()
-		}
-
-		return e.Next()
-	})
-
 	// Users: create default quota on registration
 	app.OnRecordCreate("users").BindFunc(func(e *core.RecordEvent) error {
 		if err := e.Next(); err != nil {

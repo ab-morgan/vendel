@@ -82,6 +82,7 @@ func main() {
 
 	// ── Hooks ────────────────────────────────────────────────────────
 	hooks.RegisterAuthHooks(app)
+	hooks.RegisterConfigHooks(app)
 	hooks.RegisterUserHooks(app)
 	hooks.RegisterDeviceHooks(app)
 	hooks.RegisterWebhookHooks(app)

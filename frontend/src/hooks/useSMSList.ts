@@ -10,12 +10,12 @@ export const smsListQueryOptions = (messageType: SMSMessageType = "all") =>
     queryFn: async () => {
       const filter =
         messageType === "all" ? "" : `message_type = '${messageType}'`
-      const result = await pb.collection("sms_messages").getList(1, 100, {
+      const items = await pb.collection("sms_messages").getFullList({
         sort: "-created",
         filter,
         expand: "device",
       })
-      return { data: result.items, count: result.totalItems }
+      return { data: items, count: items.length }
     },
     staleTime: 60_000,
   })

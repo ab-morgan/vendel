@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useNavigate } from "@tanstack/react-router"
+import { ClientResponseError } from "pocketbase"
 
 import pb from "@/lib/pocketbase"
 import useCustomToast from "./useCustomToast"
@@ -31,18 +32,18 @@ const useAuth = () => {
       try {
         const result = await pb.collection("users").authRefresh()
         return result.record
-      } catch (err: any) {
+      } catch (err) {
         // Only clear auth on 401 (invalid token), not on network errors
-        if (err?.status === 401) {
+        if (err instanceof ClientResponseError && err.status === 401) {
           pb.authStore.clear()
         }
         throw err
       }
     },
     enabled: isLoggedIn(),
-    retry: (failureCount, error: any) => {
+    retry: (failureCount, error) => {
       // Don't retry auth errors (401), only transient/network failures
-      if (error?.status === 401) return false
+      if (error instanceof ClientResponseError && error.status === 401) return false
       return failureCount < 2
     },
     retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 5000),
