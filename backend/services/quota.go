@@ -58,38 +58,63 @@ func GetUserQuota(app core.App, userId string) (map[string]any, error) {
 	}, nil
 }
 
-// CheckSMSQuota verifies the user can send N SMS messages.
-func CheckSMSQuota(app core.App, userId string, count int) error {
+// checkAndIncrementSMSQuota atomically verifies the quota and increments the
+// counter in a single UPDATE. If the limit would be exceeded the row is not
+// updated and a *QuotaError is returned, eliminating the TOCTOU window that
+// existed when check and increment were separate operations.
+func checkAndIncrementSMSQuota(app core.App, userId string, count int) error {
 	quota, err := getOrCreateQuota(app, userId)
 	if err != nil {
 		return err
 	}
 
+	result, err := app.DB().
+		NewQuery(`UPDATE user_quotas
+			SET sms_sent_this_month = sms_sent_this_month + {:count}
+			WHERE id = {:id}
+			  AND sms_sent_this_month + {:count} <= (
+			    SELECT max_sms_per_month FROM user_plans WHERE id = user_quotas.plan
+			  )`).
+		Bind(dbx.Params{"count": count, "id": quota.Id}).
+		Execute()
+	if err != nil {
+		return err
+	}
+
+	n, _ := result.RowsAffected()
+	if n > 0 {
+		return nil
+	}
+
+	// 0 rows updated means the limit would be exceeded. Re-read for error details.
+	quota, err = app.FindRecordById("user_quotas", quota.Id)
+	if err != nil {
+		return fmt.Errorf("quota exceeded")
+	}
 	plan, err := app.FindRecordById("user_plans", quota.GetString("plan"))
 	if err != nil {
-		return fmt.Errorf("plan not found")
+		return fmt.Errorf("quota exceeded")
 	}
 
 	sent := quota.GetInt("sms_sent_this_month")
 	limit := plan.GetInt("max_sms_per_month")
 	available := limit - sent
-
-	if sent+count > limit {
-		return &QuotaError{
-			StatusCode: 429,
-			Body: map[string]any{
-				"detail":      fmt.Sprintf("You can only send %d more SMS this month", available),
-				"error":       "quota_exceeded",
-				"quota_type":  "sms_monthly",
-				"limit":       limit,
-				"used":        sent,
-				"available":   available,
-				"upgrade_url": "/api/plans/upgrade",
-			},
-		}
+	if available < 0 {
+		available = 0
 	}
 
-	return nil
+	return &QuotaError{
+		StatusCode: 429,
+		Body: map[string]any{
+			"detail":      fmt.Sprintf("You can only send %d more SMS this month", available),
+			"error":       "quota_exceeded",
+			"quota_type":  "sms_monthly",
+			"limit":       limit,
+			"used":        sent,
+			"available":   available,
+			"upgrade_url": "/api/plans/upgrade",
+		},
+	}
 }
 
 // CheckDeviceQuota verifies the user can register another device.
@@ -197,16 +222,15 @@ func CheckIntegrationQuota(app core.App, userId string) error {
 	return nil
 }
 
-// IncrementSMSCount atomically increases the monthly SMS counter.
-func IncrementSMSCount(app core.App, userId string, count int) error {
-	// Ensure quota record exists
+// decrementSMSCount releases a previously claimed quota reservation.
+// Used to roll back checkAndIncrementSMSQuota when subsequent operations fail.
+func decrementSMSCount(app core.App, userId string, count int) error {
 	quota, err := getOrCreateQuota(app, userId)
 	if err != nil {
 		return err
 	}
-
 	_, err = app.DB().
-		NewQuery("UPDATE user_quotas SET sms_sent_this_month = sms_sent_this_month + {:count} WHERE id = {:id}").
+		NewQuery("UPDATE user_quotas SET sms_sent_this_month = MAX(sms_sent_this_month - {:count}, 0) WHERE id = {:id}").
 		Bind(dbx.Params{"count": count, "id": quota.Id}).
 		Execute()
 	return err
@@ -247,26 +271,35 @@ func CreateDefaultQuota(app core.App, userId string) error {
 }
 
 // ResetMonthlyQuotas resets SMS counters for users whose 30-day cycle has elapsed.
+// Records are processed in batches of 200 to avoid loading the full table into memory.
 func ResetMonthlyQuotas(app core.App) error {
+	const batchSize = 200
 	now := time.Now().UTC()
-	records, err := app.FindRecordsByFilter("user_quotas", "1=1", "", 0, 0)
-	if err != nil {
-		return err
-	}
-
 	resetCount := 0
-	for _, q := range records {
-		lastReset := q.GetDateTime("last_reset_date")
-		if lastReset.IsZero() {
-			continue
+
+	for page := 1; ; page++ {
+		records, err := app.FindRecordsByFilter("user_quotas", "1=1", "", batchSize, (page-1)*batchSize)
+		if err != nil {
+			return err
 		}
-		if now.Before(lastReset.Time().AddDate(0, 0, 30)) {
-			continue // cycle hasn't elapsed yet
+		if len(records) == 0 {
+			break
 		}
-		q.Set("sms_sent_this_month", 0)
-		q.Set("last_reset_date", types.NowDateTime())
-		if err := app.Save(q); err == nil {
-			resetCount++
+
+		for _, q := range records {
+			lastReset := q.GetDateTime("last_reset_date")
+			if lastReset.IsZero() || now.Before(lastReset.Time().AddDate(0, 0, 30)) {
+				continue
+			}
+			q.Set("sms_sent_this_month", 0)
+			q.Set("last_reset_date", types.NowDateTime())
+			if err := app.Save(q); err == nil {
+				resetCount++
+			}
+		}
+
+		if len(records) < batchSize {
+			break
 		}
 	}
 

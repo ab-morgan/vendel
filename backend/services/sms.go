@@ -26,29 +26,32 @@ func SendSMS(app core.App, userId string, recipients []string, body string, devi
 		return nil, fmt.Errorf("no recipients provided")
 	}
 
-	if err := CheckSMSQuota(app, userId, len(recipients)); err != nil {
-		return nil, err
-	}
-
+	// Resolve devices and contacts before claiming quota so failures here don't
+	// require a quota rollback.
 	aeumProvider := smsprovider.DefaultAEUM()
 	devices, err := resolveDevices(app, userId, deviceId, aeumProvider)
 	if err != nil {
 		return nil, err
 	}
 
-	// Build contact lookup for template interpolation
 	var contactMap map[string]*core.Record
 	if tmpl != nil {
 		contactMap = buildContactMap(app, userId, recipients)
 	}
 
-	messages, err := createMessageRecords(app, userId, recipients, body, devices, tmpl, contactMap)
-	if err != nil {
+	// Atomically claim quota. Only createMessageRecords (below) needs a rollback
+	// path, since it is the sole write that follows this point.
+	if err := checkAndIncrementSMSQuota(app, userId, len(recipients)); err != nil {
 		return nil, err
 	}
 
-	if err := IncrementSMSCount(app, userId, len(recipients)); err != nil {
-		app.Logger().Warn("failed to increment SMS count", slog.Any("error", err))
+	messages, err := createMessageRecords(app, userId, recipients, body, devices, tmpl, contactMap)
+	if err != nil {
+		// Release the claimed quota since no messages were persisted.
+		if dErr := decrementSMSCount(app, userId, len(recipients)); dErr != nil {
+			app.Logger().Warn("failed to release quota reservation", slog.Any("error", dErr))
+		}
+		return nil, err
 	}
 
 	if len(devices) > 0 {
